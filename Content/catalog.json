@@ -1,0 +1,10 @@
+{
+  "categories": [
+    { "slug": "policies", "name": "Policies and guidelines", "description": "Incubation policy, rules, SOPs and official guidelines." },
+    { "slug": "mous", "name": "MoUs and agreements", "description": "Signed MoUs, incubation agreements and partner contracts." },
+    { "slug": "reports", "name": "Reports", "description": "Annual reports, progress reports and meeting minutes." },
+    { "slug": "templates", "name": "Templates and forms", "description": "Application forms, pitch deck templates and letter formats." },
+    { "slug": "events", "name": "Event material", "description": "Posters, brochures, schedules and reports from events." },
+    { "slug": "other", "name": "Other", "description": "Anything that does not fit the folders above." }
+  ]
+}
