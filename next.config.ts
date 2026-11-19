@@ -1,6 +1,6 @@
 import type { NextConfig } from 'next';
 
-// Uploads go to our own /api/upload route; sign-in leaves for accounts.google.com.
+// Everything, uploads and sign-in included, goes to this site's own routes.
 const csp = [
   "default-src 'self'",
   "script-src 'self' 'unsafe-inline'",
@@ -9,12 +9,14 @@ const csp = [
   "connect-src 'self'",
   "frame-src 'self'",
   "frame-ancestors 'self'",
-  "form-action 'self' https://accounts.google.com",
+  "form-action 'self'",
   "object-src 'none'",
   "base-uri 'self'",
 ].join('; ');
 
 export default {
+  // .members is read from disk at request time; make sure it ships with the server functions
+  outputFileTracingIncludes: { '/**': ['./.members'] },
   async headers() {
     if (process.env.NODE_ENV !== 'production') return []; // dev tooling needs eval
     return [

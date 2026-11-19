@@ -1,0 +1,3 @@
+# ICDMS members: each line is one IC member's official college email, scrambled (SHA-256).
+# Nobody can read the emails back from this file. Do not edit by hand.
+# Add a member:  npm run add-member name@nitp.ac.in

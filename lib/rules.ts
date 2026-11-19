@@ -77,15 +77,23 @@ export function check(path: string, bytes: number, head: Uint8Array, catalog: Ca
   return { category: p.category, file: p.file, ext: p.ext, path, bytes, title: titleFromName(p.stem).replace(/^./, (c) => c.toUpperCase()), by: '', at: '' };
 }
 
-const EMAIL = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-/** Is this email on the IC members list? Case and surrounding spaces don't matter. */
-export const isMember = (email: string | null | undefined, members: string[]) =>
-  !!email && members.some((m) => m.trim().toLowerCase() === email.trim().toLowerCase());
+export const isEmail = (s: string) => s.length <= 254 && /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s.trim());
+/** Problem with the name a member signs in with (shown next to their uploads), or '' when fine. */
+export const checkName = (s: string) => (s.trim().length < 2 || s.trim().length > 60 ? 'Enter your name, 2 to 60 characters' : '');
 
-/** Problems in members.json; an empty list means it is valid. */
-export function checkMembers(m: { emails?: unknown }): string[] {
-  if (!Array.isArray(m?.emails)) return ['members.json needs an "emails" list'];
-  return m.emails.flatMap((e) => (typeof e === 'string' && EMAIL.test(e.trim()) ? [] : [`Not an email address: ${JSON.stringify(e)}`]));
+const HASH = /^[0-9a-f]{64}$/;
+/** Read .members: one SHA-256 hash per line; blank lines and # comments are ignored. */
+export function parseMembers(text: string) {
+  const hashes: string[] = [];
+  const problems: string[] = [];
+  text.split(/\r?\n/).forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) return;
+    if (!HASH.test(line)) problems.push(`.members line ${i + 1} is not a member hash. Add members with: npm run add-member name@nitp.ac.in`);
+    else if (hashes.includes(line)) problems.push(`.members line ${i + 1} is a duplicate`);
+    else hashes.push(line);
+  });
+  return { hashes, problems };
 }
 
 /** Merge a sidecar into an item. Files committed by hand have none, or a broken one; they keep their defaults. */

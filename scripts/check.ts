@@ -1,11 +1,13 @@
-// Self-check of the content rules, the members list and the upload routes, then validation of Content/ and members.json.
+// Self-check of the content rules, the members list, sign-in tokens and the upload routes, then validation of Content/ and .members.
 // Run with: npm run check   (Node 22.18+ runs TypeScript directly, no install needed)
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { loadContent } from '../lib/content.ts';
+import { memberHash, MEMBERS_FILE } from '../lib/members.ts';
+import { sign, verify } from '../lib/session.ts';
 import { handlePart, handleUpload } from '../lib/upload.ts';
-import { byNewest, check, checkCatalog, checkMembers, isMember, PART_BYTES, slugify, targetPath, titleFromName, withMeta, type Catalog, type Item } from '../lib/rules.ts';
+import { byNewest, check, checkCatalog, checkName, isEmail, PART_BYTES, parseMembers, slugify, targetPath, titleFromName, withMeta, type Catalog, type Item } from '../lib/rules.ts';
 
 const catalog: Catalog = { categories: [{ slug: 'reports', name: 'Reports', description: '' }] };
 const PDF = [0x25, 0x50, 0x44, 0x46, 0x2d];
@@ -38,13 +40,31 @@ assert.deepEqual(
   ['2026-06-01', '2026-01-01', ''],
 );
 
-// Members list: case and spaces don't matter, nobody else gets in.
-const team = ['Harsh.K@nitp.ac.in ', 'asha@nitp.ac.in'];
-assert(isMember('harsh.k@NITP.ac.in', team));
-assert(!isMember('harsh.k@gmail.com', team));
-assert(!isMember(undefined, team) && !isMember('', team));
-assert.equal(checkMembers({ emails: ['a@nitp.ac.in', 'not an email', 7] }).length, 2);
-assert.equal(checkMembers({}).length, 1);
+// Members list: hashed, case and spaces don't matter, the file holds no readable email.
+const h = memberHash('Harsh.K@nitp.ac.in ');
+assert.equal(h, memberHash('harsh.k@NITP.ac.in'));
+assert.notEqual(h, memberHash('harsh.k@gmail.com'));
+assert.match(h, /^[0-9a-f]{64}$/);
+assert.notEqual(h, createHash('sha256').update('harsh.k@nitp.ac.in').digest('hex'), 'prefixed, so plain email-hash lists do not match');
+const parsed = parseMembers(`# comment\n\n${h}\r\n${h}\nharsh.k@nitp.ac.in\n`);
+assert.deepEqual(parsed.hashes, [h]);
+assert.equal(parsed.problems.length, 2, 'a duplicate, and a plain email pasted in by mistake');
+assert(isEmail('a.b@nitp.ac.in') && !isEmail('a b@nitp.ac.in') && !isEmail('nitp.ac.in'));
+assert(!checkName('Asha Kumari') && checkName(' a ') && checkName('x'.repeat(61)));
+
+// Sign-in tokens: only the server can make them, they expire, and a link token is not a session.
+process.env.AUTH_SECRET = 'test-secret-that-is-long-enough';
+const t = sign({ email: 'a@nitp.ac.in', name: 'Asha', use: 'login' }, 900, 1_000_000);
+assert.equal(verify(t, 'login', 1_000_000)?.email, 'a@nitp.ac.in');
+assert.equal(verify(t, 'session', 1_000_000), null, 'a login link is not a session');
+assert.equal(verify(t, 'login', 1_000_000 + 901_000), null, 'expired after 15 minutes');
+const [data, sig] = t.split('.');
+const forged = Buffer.from(JSON.stringify({ email: 'boss@nitp.ac.in', name: 'X', use: 'login', exp: 9e9 })).toString('base64url');
+assert.equal(verify(`${forged}.${sig}`, 'login', 1_000_000), null, 'changing the payload breaks the signature');
+assert.equal(verify(`${data}.${sig.slice(0, -2)}xx`, 'login', 1_000_000), null);
+for (const junk of [undefined, null, '', 'abc', 'a.b.c', `${data}.`]) assert.equal(verify(junk, 'login'), null);
+process.env.AUTH_SECRET = 'a-different-secret-entirely-xyz';
+assert.equal(verify(t, 'login', 1_000_000), null, 'another secret, another signature');
 
 // The upload routes against a fake GitHub that keeps blobs: parts joined in order, one commit,
 // never an overwrite, retry when main moves.
@@ -126,7 +146,8 @@ for (const bad of [null, { ...meta, parts: [] }, { ...meta, parts: ['../etc'] },
 assert.equal(calls.length, 0, 'invalid uploads never reach GitHub');
 
 const { items, problems } = loadContent();
-const memberProblems = checkMembers(JSON.parse(readFileSync('members.json', 'utf8')));
-if (memberProblems.length) console.error(`members.json:\n${memberProblems.join('\n')}`);
-if (problems.length || memberProblems.length) process.exit(1); // loadContent already printed its problems
-console.log(`Rules OK. ${items.length} files in Content/ are valid. members.json is valid.`);
+const members = parseMembers(readFileSync(MEMBERS_FILE, 'utf8'));
+if (members.problems.length) console.error(members.problems.join('\n'));
+if (!members.hashes.length) console.warn('.members is empty, so nobody can upload yet. Add yourself: npm run add-member name@nitp.ac.in');
+if (problems.length || members.problems.length) process.exit(1); // loadContent already printed its problems
+console.log(`Rules OK. ${items.length} files in Content/ are valid. ${members.hashes.length} members in .members.`);
