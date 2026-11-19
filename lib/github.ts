@@ -30,17 +30,23 @@ const exists = (path: string, ref: string) =>
     (e) => (e instanceof GitHubError && e.status === 404 ? false : Promise.reject(e)),
   );
 
+/** Store bytes as a Git blob. Until a commit points at it, nothing on main changes; GitHub garbage-collects strays. */
+export const putBlob = async (bytes: Uint8Array) =>
+  (await gh<{ sha: string }>('/git/blobs', { content: Buffer.from(bytes).toString('base64'), encoding: 'base64' })).sha;
+
+export const getBlob = async (sha: string) => Buffer.from((await gh<{ content: string }>(`/git/blobs/${sha}`)).content, 'base64');
+
 /**
  * Adds one file and its sidecar to main as a single commit, never overwriting anything. The blobs
  * upload once. If another upload lands first, main has moved, GitHub refuses our non-forced ref
  * update, and we rebuild on the new head; the "already exists" check runs against that same head,
  * so two people choosing the same name at the same moment cannot overwrite each other.
  */
-export async function addUpload(path: string, base64: string, meta: Meta, message: string, attempts = 3) {
-  const blob = async (content: string, encoding: string) => (await gh<{ sha: string }>('/git/blobs', { content, encoding })).sha;
+export async function addUpload(path: string, bytes: Uint8Array, meta: Meta, message: string, attempts = 3) {
+  const sidecar = await gh<{ sha: string }>('/git/blobs', { content: `${JSON.stringify(meta, null, 2)}\n`, encoding: 'utf-8' });
   const tree = [
-    { path, mode: '100644', type: 'blob', sha: await blob(base64, 'base64') },
-    { path: `${path}.json`, mode: '100644', type: 'blob', sha: await blob(`${JSON.stringify(meta, null, 2)}\n`, 'utf-8') },
+    { path, mode: '100644', type: 'blob', sha: await putBlob(bytes) },
+    { path: `${path}.json`, mode: '100644', type: 'blob', sha: sidecar.sha },
   ];
   for (let attempt = 1; ; attempt++) {
     const parent = (await gh<{ object: { sha: string } }>(`/git/ref/heads/${BRANCH}`)).object.sha;

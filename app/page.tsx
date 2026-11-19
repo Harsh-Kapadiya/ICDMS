@@ -16,7 +16,7 @@ export default function Home() {
         eyebrow="Incubation Center, NIT Patna"
         eyebrowHref={`https://github.com/${REPO}`}
         title="Every document, one place."
-        subtitle="Policies, MoUs, reports, templates and event material from the Incubation Center. Anyone can browse and download. Sign in with Google to add a file."
+        subtitle="Policies, MoUs, reports, templates and event material from the Incubation Center. Anyone can browse and download. IC members sign in with their college email to add files."
       >
         <nav aria-label="Folders" className="mx-auto max-w-4xl">
           <ul className="grid gap-3 text-left sm:grid-cols-2 lg:grid-cols-3">

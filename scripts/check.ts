@@ -1,9 +1,11 @@
-// Self-check of the content rules and the upload route, then validation of everything in Content/.
+// Self-check of the content rules, the members list and the upload routes, then validation of Content/ and members.json.
 // Run with: npm run check   (Node 22.18+ runs TypeScript directly, no install needed)
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { loadContent } from '../lib/content.ts';
-import { handleUpload } from '../lib/upload.ts';
-import { byNewest, check, checkCatalog, slugify, targetPath, titleFromName, withMeta, type Catalog, type Item } from '../lib/rules.ts';
+import { handlePart, handleUpload } from '../lib/upload.ts';
+import { byNewest, check, checkCatalog, checkMembers, isMember, PART_BYTES, slugify, targetPath, titleFromName, withMeta, type Catalog, type Item } from '../lib/rules.ts';
 
 const catalog: Catalog = { categories: [{ slug: 'reports', name: 'Reports', description: '' }] };
 const PDF = [0x25, 0x50, 0x44, 0x46, 0x2d];
@@ -20,7 +22,8 @@ assert(!ok('Content/finance/annual-report.pdf'), 'unknown category');
 assert(!ok('Content/reports/../x.pdf'), 'path escape');
 assert(!ok('Content/reports/a/b.pdf'), 'no subfolders');
 assert(!ok('Content/reports/Annual Report.pdf'), 'spaces and capitals');
-assert(!ok('Content/reports/big-file.pdf', PDF, 4 * 1024 * 1024 + 1), 'over 4 MB');
+assert(ok('Content/reports/big-file.pdf', PDF, 10 * 1024 * 1024), 'exactly 10 MB');
+assert(!ok('Content/reports/big-file.pdf', PDF, 10 * 1024 * 1024 + 1), 'over 10 MB');
 assert(!ok('Content/reports/toString.pdf'), 'capitals');
 assert.equal(slugify('MoU with Acme Pvt. Ltd. (2026)'), 'mou-with-acme-pvt-ltd-2026');
 assert.equal(titleFromName('MoU_with-Acme.PDF'), 'MoU with Acme');
@@ -35,49 +38,95 @@ assert.deepEqual(
   ['2026-06-01', '2026-01-01', ''],
 );
 
-// The upload route against a fake GitHub: one commit, never an overwrite, retry when main moves.
+// Members list: case and spaces don't matter, nobody else gets in.
+const team = ['Harsh.K@nitp.ac.in ', 'asha@nitp.ac.in'];
+assert(isMember('harsh.k@NITP.ac.in', team));
+assert(!isMember('harsh.k@gmail.com', team));
+assert(!isMember(undefined, team) && !isMember('', team));
+assert.equal(checkMembers({ emails: ['a@nitp.ac.in', 'not an email', 7] }).length, 2);
+assert.equal(checkMembers({}).length, 1);
+
+// The upload routes against a fake GitHub that keeps blobs: parts joined in order, one commit,
+// never an overwrite, retry when main moves.
+const MB = 1024 * 1024;
+const blobs = new Map<string, string>(); // sha -> base64
 let calls: string[] = [];
 let taken = false;
 let moves = 0;
+let lastTree: { path: string; sha: string }[] = [];
 globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
   const call = `${init?.method ?? 'GET'} ${String(url).replace(/^.*\/repos\/[^/]+\/[^/]+/, '').replace(/\?.*/, '')}`;
   calls.push(call);
+  const body = init?.body ? JSON.parse(String(init.body)) : {};
+  if (call === 'POST /git/blobs') {
+    const content = body.encoding === 'base64' ? body.content : Buffer.from(body.content).toString('base64');
+    const sha = createHash('sha1').update(content).digest('hex');
+    blobs.set(sha, content);
+    return Response.json({ sha });
+  }
+  if (call.startsWith('GET /git/blobs/')) {
+    const content = blobs.get(call.slice('GET /git/blobs/'.length));
+    return content ? Response.json({ content, encoding: 'base64' }) : new Response('{}', { status: 404 });
+  }
   if (call.startsWith('GET /contents/')) return taken ? Response.json({}) : new Response('{}', { status: 404 });
   if (call.startsWith('PATCH') && moves-- > 0) return new Response('{"message":"Update is not a fast forward"}', { status: 422 });
+  if (call === 'POST /git/trees') lastTree = body.tree;
   return Response.json({ object: { sha: 'head' }, tree: { sha: 'base' }, sha: 'new', html_url: 'https://github.com/c/new' });
 }) as typeof fetch;
 
-const form = (title: string, name: string, bytes = PDF, category = 'reports') => {
-  const f = new FormData();
-  f.set('file', new File([new Uint8Array(bytes)], name));
-  f.set('title', title);
-  f.set('category', category);
-  return f;
+/** What the browser does: send the file in parts, then ask for the commit. */
+async function send(title: string, name: string, bytes: Uint8Array, category = 'reports') {
+  const parts: string[] = [];
+  for (let at = 0; at < bytes.length; at += PART_BYTES) {
+    const f = new FormData();
+    f.set('part', new Blob([bytes.slice(at, at + PART_BYTES)]));
+    const r = await handlePart(f);
+    if (r.status !== 201) return r;
+    parts.push(r.body.sha!);
+  }
+  return handleUpload({ name, title, category, parts }, 'Asha', catalog, new Date('2026-11-18T10:00:00Z'));
+}
+const pdf = (size: number) => {
+  const b = new Uint8Array(size).map((_, i) => i % 251);
+  b.set(PDF);
+  return b;
 };
-const upload = (f: FormData) => handleUpload(f, 'Asha', catalog, new Date('2026-11-18T10:00:00Z'));
 
-let r = await upload(form('Q3 Report', 'anything.pdf'));
+const big = pdf(10 * MB); // exactly the limit: 4 parts
+let r = await send('Q3 Report', 'anything.pdf', big);
 assert.equal(r.status, 201);
 assert.equal(r.body.path, 'Content/reports/q3-report.pdf');
-assert.deepEqual(calls, ['POST /git/blobs', 'POST /git/blobs', 'GET /git/ref/heads/main', 'GET /contents/Content/reports/q3-report.pdf', 'GET /git/commits/head', 'POST /git/trees', 'POST /git/commits', 'PATCH /git/refs/heads/main']);
+assert.equal(calls.filter((c) => c === 'POST /git/blobs').length, 4 + 2, '4 parts, then the joined file and its sidecar');
+const saved = Buffer.from(blobs.get(lastTree.find((t) => t.path === 'Content/reports/q3-report.pdf')!.sha)!, 'base64');
+assert(saved.equals(Buffer.from(big)), 'the committed file is the parts joined in order');
+assert.deepEqual(JSON.parse(Buffer.from(blobs.get(lastTree[1].sha)!, 'base64').toString()), { title: 'Q3 Report', by: 'Asha', at: '2026-11-18T10:00:00.000Z' });
 
 calls = [];
 moves = 1;
-assert.equal((await upload(form('Q3 Report', 'a.pdf'))).status, 201, 'retries when another upload lands first');
+assert.equal((await send('Q3 Report', 'a.pdf', pdf(1000))).status, 201, 'retries when another upload lands first');
 assert.equal(calls.filter((c) => c.startsWith('PATCH')).length, 2);
 
 calls = [];
 taken = true;
-assert.equal((await upload(form('Q3 Report', 'a.pdf'))).status, 409, 'never overwrites');
+assert.equal((await send('Q3 Report', 'a.pdf', pdf(1000))).status, 409, 'never overwrites');
 assert(!calls.some((c) => c.startsWith('PATCH')), 'a refused upload must not move main');
 taken = false;
 
+assert.equal((await send('Too Big', 'a.pdf', pdf(10 * MB + 1))).status, 400, 'over 10 MB');
+assert.equal((await send('Renamed', 'a.pdf', new Uint8Array(ZIP))).status, 400, 'checks the bytes, not just the name');
+const tooBigPart = new FormData();
+tooBigPart.set('part', new Blob([new Uint8Array(PART_BYTES + 1)]));
+assert.equal((await handlePart(tooBigPart)).status, 400, 'a part over 3 MB is refused');
+
 calls = [];
-assert.equal((await upload(form('Q3 Report', 'a.pdf', ZIP))).status, 400, 'checks the bytes, not just the name');
-assert.equal((await upload(form('Q3 Report', 'a.pdf', PDF, 'finance'))).status, 400);
-assert.equal((await upload(form('  ', 'a.pdf'))).status, 400);
+assert.equal((await handlePart(new FormData())).status, 400, 'a request with no part');
+const meta = { name: 'a.pdf', title: 'Q3 Report', category: 'reports', parts: ['a'.repeat(40)] };
+for (const bad of [null, { ...meta, parts: [] }, { ...meta, parts: ['../etc'] }, { ...meta, parts: Array(5).fill('a'.repeat(40)) }, { ...meta, title: ' ' }, { ...meta, category: 'finance' }, { ...meta, name: 'x.html' }])
+  assert.equal((await handleUpload(bad, 'Asha', catalog)).status, 400, JSON.stringify(bad));
 assert.equal(calls.length, 0, 'invalid uploads never reach GitHub');
 
 const { items, problems } = loadContent();
-if (problems.length) process.exit(1); // loadContent already printed them
-console.log(`Rules OK. ${items.length} files in Content/ are valid.`);
+const memberProblems = checkMembers(JSON.parse(readFileSync('members.json', 'utf8')));
+if (memberProblems.length) console.error(`members.json:\n${memberProblems.join('\n')}`);
+if (problems.length || memberProblems.length) process.exit(1); // loadContent already printed its problems
+console.log(`Rules OK. ${items.length} files in Content/ are valid. members.json is valid.`);

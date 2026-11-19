@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { CircleAlert, CircleCheck, LoaderCircle, Upload as UploadIcon, X } from 'lucide-react';
 import { buttonVariants } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { ACCEPT, check, checkTitle, extOf, fmtSize, MAX_BYTES, MAX_FILES, MAX_TITLE, plural, targetPath, titleFromName, type Category } from '@/lib/rules';
+import { ACCEPT, check, checkTitle, extOf, fmtSize, MAX_BYTES, MAX_FILES, MAX_TITLE, PART_BYTES, plural, targetPath, titleFromName, type Category } from '@/lib/rules';
 
 type Row = { file: File; head: Uint8Array; title: string; state: 'ready' | 'sending' | 'done' | 'failed'; message?: string; url?: string; path?: string };
 
@@ -16,7 +16,6 @@ const note = 'mt-2 flex items-start gap-2 text-sm [&_svg]:mt-0.5 [&_svg]:size-4 
 /**
  * The browser checks every file against the same rules as the server, so problems show before
  * anything is sent. Files then go one by one; each becomes its own commit.
- * ponytail: one commit per file keeps every request under Vercel's 4.5 MB cap; batch commits need signed blob handoffs
  */
 export default function UploadForm({ categories, initial }: { categories: Category[]; initial: string }) {
   const [category, setCategory] = useState(initial);
@@ -44,21 +43,31 @@ export default function UploadForm({ categories, initial }: { categories: Catego
   const waiting = rows.filter((r) => r.state !== 'done').length;
   const ready = !busy && waiting > 0 && waiting <= MAX_FILES && problems.every((p) => !p);
 
+  const post = async (url: string, body: FormData | string) => {
+    const res = await fetch(url, { method: 'POST', body, headers: typeof body === 'string' ? { 'Content-Type': 'application/json' } : undefined });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(json.error ?? `Upload failed (${res.status})`);
+    return json;
+  };
+
   const upload = async () => {
     setBusy(true);
     for (const [i, r] of rows.entries()) {
       if (r.state === 'done') continue;
-      update(i, { state: 'sending', message: undefined });
-      const body = new FormData();
-      body.set('file', r.file);
-      body.set('title', r.title.trim());
-      body.set('category', category);
       try {
-        const res = await fetch('/api/upload', { method: 'POST', body });
-        const json = await res.json().catch(() => ({}));
-        update(i, res.ok ? { state: 'done', url: json.url, path: json.path } : { state: 'failed', message: json.error ?? `Upload failed (${res.status})` });
-      } catch {
-        update(i, { state: 'failed', message: 'Network error. Check your connection and try again.' });
+        // Vercel refuses request bodies over 4.5 MB, so the file goes up in parts and the server joins them
+        const parts: string[] = [];
+        for (let at = 0; at < r.file.size; at += PART_BYTES) {
+          update(i, { state: 'sending', message: r.file.size > PART_BYTES ? `Uploading… ${Math.round((at / r.file.size) * 100)}%` : undefined });
+          const form = new FormData();
+          form.set('part', r.file.slice(at, at + PART_BYTES));
+          parts.push((await post('/api/upload/part', form)).sha);
+        }
+        update(i, { message: 'Saving…' });
+        const json = await post('/api/upload', JSON.stringify({ name: r.file.name, title: r.title.trim(), category, parts }));
+        update(i, { state: 'done', url: json.url, path: json.path, message: undefined });
+      } catch (e) {
+        update(i, { state: 'failed', message: e instanceof TypeError ? 'Network error. Check your connection and try again.' : (e as Error).message });
       }
     }
     setBusy(false);
@@ -130,7 +139,7 @@ export default function UploadForm({ categories, initial }: { categories: Catego
                   {r.state === 'sending' && (
                     <p className={cn(note, 'text-muted-foreground')}>
                       <LoaderCircle aria-hidden className="animate-spin" />
-                      Uploading…
+                      {r.message ?? 'Uploading…'}
                     </p>
                   )}
                   {r.state === 'done' && (
